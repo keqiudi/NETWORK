@@ -159,36 +159,13 @@ difficult_classes = ['Analysis', 'Backdoor', 'Worms']
 difficult_class_indices = [i for i, name in enumerate(label_encoder.classes_) if name in difficult_classes]
 
 for cls_idx in difficult_class_indices:
-    class_weight_dict[cls_idx] *= 1.5  # 增加小类别权重倍数
+    class_weight_dict[cls_idx] *= 2.0  # 增加小类别权重倍数
 
 print("调整后的类别权重:", class_weight_dict)
 
 
 
-# 6.2 带进度条的训练函数
-def train_with_progress(model, X, y, X_val=None, y_val=None, total_trees=300, batch_size=30):
-    """带验证监控的训练"""
-    model.rf.n_estimators = 0  # 仅监控随机森林部分
-    best_score = 0
-
-    with tqdm(total=total_trees,
-              desc=f"{' TRAINING PROGRESS ':#^50}",
-              bar_format="{l_bar}{bar:30}{r_bar}") as pbar:
-        for _ in range(0, total_trees, batch_size):
-            model.rf.n_estimators += batch_size
-            model.fit(X, y)
-
-            # 每50棵树验证一次
-            if X_val is not None and (_ // batch_size) % 5 == 0:
-                current_pred = model.predict(X_val)
-                current_f1 = f1_score(y_val, current_pred, average='macro')
-                pbar.set_postfix({'Val F1': f'{current_f1:.4f}'})
-                if current_f1 > best_score:
-                    best_score = current_f1
-
-            pbar.update(batch_size)
-
-# 超参数搜索
+# 6.2 超参数搜索
 import optuna
 from optuna.pruners import MedianPruner
 from sklearn.metrics import f1_score
@@ -224,9 +201,9 @@ def optimize_xgb(trial):
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 350),
         'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'learning_rate': trial.suggest_uniform('learning_rate', 0.05, 0.15),
-        'subsample': trial.suggest_uniform('subsample', 0.6, 1.0),
-        'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.6, 1.0),
+        'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.15),
+        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
     }
     xgb = XGBClassifier(
         random_state=42,
@@ -243,7 +220,7 @@ def optimize_xgb(trial):
 # 随机森林调优
 print("\nOptimizing RandomForest Hyperparameters...")
 rf_study = optuna.create_study(direction="maximize", pruner=MedianPruner())
-rf_study.optimize(optimize_rf, n_trials=50, n_jobs=10, timeout=45)  # 允许并行运行 10 个线程，限制 45 秒
+rf_study.optimize(optimize_rf, n_trials=50, n_jobs=10, timeout=60)  # 允许并行运行 10 个线程，限制 60 秒
 
 print("RandomForest 最佳参数:", rf_study.best_params)
 print("RandomForest 最佳 F1 分数:", rf_study.best_value)
@@ -251,7 +228,7 @@ print("RandomForest 最佳 F1 分数:", rf_study.best_value)
 # XGBoost调优
 print("\nOptimizing XGBoost Hyperparameters...")
 xgb_study = optuna.create_study(direction="maximize", pruner=MedianPruner())
-xgb_study.optimize(optimize_xgb, n_trials=50, n_jobs=10, timeout=45)  # 允许并行运行 10 个线程，限制 45 秒
+xgb_study.optimize(optimize_xgb, n_trials=50, n_jobs=10, timeout=60)  # 允许并行运行 10 个线程，限制 60 秒
 
 print("XGBoost 最佳参数:", xgb_study.best_params)
 print("XGBoost 最佳 F1 分数:", xgb_study.best_value)
@@ -301,8 +278,34 @@ def create_model():
     return HybridModel()
 
 # ==================== 7. 模型训练与验证 ====================
+
+# 带进度条的训练函数
+def train_with_progress(model, X, y, X_val=None, y_val=None, total_trees=300, batch_size=30):
+    """带验证监控的训练"""
+    model.rf.n_estimators = 0  # 仅监控随机森林部分
+    best_score = 0
+
+    with tqdm(total=total_trees,
+              desc=f"{' TRAINING PROGRESS ':#^50}",
+              bar_format="{l_bar}{bar:30}{r_bar}") as pbar:
+        for _ in range(0, total_trees, batch_size):
+            model.rf.n_estimators += batch_size
+            model.fit(X, y)
+
+            # 每50棵树验证一次
+            if X_val is not None and (_ // batch_size) % 5 == 0:
+                current_pred = model.predict(X_val)
+                current_f1 = f1_score(y_val, current_pred, average='macro')
+                pbar.set_postfix({'Val F1': f'{current_f1:.4f}'})
+                if current_f1 > best_score:
+                    best_score = current_f1
+
+            pbar.update(batch_size)
+
+
 # 7.1 第一阶段训练
-print("\n" + " PHASE 1: INITIAL TRAINING (80% DATA) ".center(50, "="))
+print("\n" + " PHASE 1: INITIAL TRAINING (80%训练 20%验证) ".center(50, "="))
+
 model = create_model()
 train_with_progress(model, X_tr_res, y_tr_res, X_val, y_val)  # 传入验证数据
 
@@ -331,8 +334,8 @@ print("=" * 65)
 # 在现有代码后添加阈值优化
 from sklearn.metrics import precision_recall_curve
 
-
 def optimize_threshold(model, X_val, y_val, target_class):
+    """为指定类别优化预测阈值"""
     class_idx = label_encoder.transform([target_class])[0]
     y_proba = model.predict_proba(X_val)[:, class_idx]  # 获取目标类别的概率
 
@@ -341,27 +344,48 @@ def optimize_threshold(model, X_val, y_val, target_class):
     )
 
     # 寻找满足最低召回率的阈值
-    viable_thresholds = thresholds[recall[:-1] > 0.3]  # Backdoor最低召回率30%
+    viable_thresholds = thresholds[recall[:-1] > 0.3]  # 设定最低召回率为 30%
     if len(viable_thresholds) > 0:
         best_threshold = viable_thresholds[np.argmax(precision[:-1][recall[:-1] > 0.3])]
     else:
         best_threshold = 0.5
 
-    # 应用优化后的阈值
-    optimized_pred = (y_proba >= best_threshold).astype(int)
-    return optimized_pred
+    return best_threshold
 
 
-# 对Backdoor进行阈值优化
-backdoor_idx = label_encoder.transform(['Backdoor'])[0]
-val_pred_optimized = val_pred.copy()
-val_pred_optimized[y_val == backdoor_idx] = optimize_threshold(model, X_val[y_val == backdoor_idx],
-                                                               y_val[y_val == backdoor_idx], 'Backdoor')
+# 针对多个目标类别优化阈值
+target_classes = ['Analysis', 'Backdoor', 'DoS']
+optimized_thresholds = {}
+
+for target_class in target_classes:
+    optimized_thresholds[target_class] = optimize_threshold(model, X_val, y_val, target_class)
+    print(f"优化后的 {target_class} 类别阈值: {optimized_thresholds[target_class]:.4f}")
+
+# 应用优化阈值
+def apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes):
+    """根据优化后的阈值调整预测结果"""
+    y_proba = model.predict_proba(X_val)
+    final_pred = np.argmax(y_proba, axis=1)  # 默认预测结果
+
+    for target_class in target_classes:
+        class_idx = label_encoder.transform([target_class])[0]
+        threshold = optimized_thresholds[target_class]
+
+        # 根据阈值调整预测
+        class_proba = y_proba[:, class_idx]
+        final_pred[(class_proba >= threshold)] = class_idx
+
+    return final_pred
+
+
+# 使用优化后的阈值调整预测结果
+val_pred_optimized = apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes)
+val_labels_optimized = label_encoder.inverse_transform(val_pred_optimized)
 
 # 生成优化后的报告
 print("\n" + " 优化后验证报告 ".center(50, "="))
 print(classification_report(
-    true_labels, label_encoder.inverse_transform(val_pred_optimized),
+    true_labels, val_labels_optimized,
     target_names=label_encoder.classes_,
     digits=4
 ))
@@ -369,8 +393,9 @@ print(classification_report(
 # ==================== 8. 全量训练与结果生成 ====================
 # 8.1 第二阶段训练
 print("\n" + " PHASE 2: FULL DATA TRAINING ".center(50, "="))
+
 model_full = create_model()  # 创建新的 HybridModel 实例
-model_full.fit(X_train_processed, y_train_encoded)  # 训练模型
+train_with_progress(model_full, X_train_processed, y_train_encoded)  # 使用全量数据训练
 
 # 验证模型是否正确训练
 from sklearn.utils.validation import check_is_fitted
