@@ -254,7 +254,7 @@ def optimize_xgb(trial):
 # ==================== 并行超参数优化 ====================
 # 随机森林调优
 print("\nOptimizing RandomForest Hyperparameters...")
-rf_study = optuna.create_study(direction="maximize", pruner=MedianPruner())
+rf_study = optuna.create_study(direction="maximize", pruginer=MedianPruner())
 rf_study.optimize(optimize_rf, n_trials=50, n_jobs=10, timeout=120)  # 允许并行运行 10 个线程，限制 60 秒
 
 print("RandomForest 最佳参数:", rf_study.best_params)
