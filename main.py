@@ -148,14 +148,10 @@ X_tr, X_val, y_tr, y_val = train_test_split(
     random_state=42
 )
 
-# 重置索引以避免索引不一致问题
-X_tr = X_tr.reset_index(drop=True)
-y_tr = pd.Series(y_tr).reset_index(drop=True)
-
-
-# ==================== 5.2 过采样配置（强烈建议开启！）====================
-from imblearn.over_sampling import ADASYN
+# 5.2 过采样配置
+from imblearn.over_sampling import SMOTE
 from collections import Counter
+from imblearn.over_sampling import ADASYN
 
 # 定义弱势类别
 weak_classes = ['Analysis', 'Backdoor', 'DoS', 'Worms']
@@ -163,22 +159,29 @@ weak_indices = [i for i, name in enumerate(label_encoder.classes_) if name in we
 
 # 计算原始分布
 original_counts = Counter(y_tr)
-# 采样策略：小类样本数扩充到主流类的40%（可微调）
-max_major = max(original_counts[i] for i in set(y_tr) if i not in weak_indices)
-sampling_strategy = {i: int(max_major * 0.4) for i in weak_indices}
 
+# 动态采样策略
+sampling_strategy = {
+    i: max(int(1.5 * original_counts[i]), original_counts[i] + 1)
+    for i in weak_indices
+}
+
+# 5.3 执行过采样
+# 使用ADASYN代替SMOTE
 adasyn = ADASYN(
     sampling_strategy=sampling_strategy,
     n_neighbors=5,
     random_state=42
 )
 
+# 添加少数类样本生成监控
 try:
     X_tr_res, y_tr_res = adasyn.fit_resample(X_tr, y_tr)
-    print(f"过采样后样本分布: {pd.Series(y_tr_res).value_counts()}")
+    print(f"生成样本分布: {pd.Series(y_tr_res).value_counts()}")
 except Exception as e:
     print(f"过采样失败: {e}")
     X_tr_res, y_tr_res = X_tr.copy(), y_tr.copy()
+
 
 # ==================== 6. 模型配置 ====================
 # 6.1 类别权重计算
@@ -385,7 +388,64 @@ print(f"► 宏平均F1: {macro_f1:.4f}（普通） | {macro_f1_opt:.4f}（阈�
 print(f"► 加权平均F1: {weighted_f1:.4f} | {weighted_f1_opt:.4f}")
 print("=" * 65)
 
+# 在现有代码后添加阈值优化
+from sklearn.metrics import precision_recall_curve
 
+def optimize_threshold(model, X_val, y_val, target_class):
+    """为指定类别优化预测阈值"""
+    class_idx = label_encoder.transform([target_class])[0]
+    y_proba = model.predict_proba(X_val)[:, class_idx]  # 获取目标类别的概率
+
+    precision, recall, thresholds = precision_recall_curve(
+        (y_val == class_idx).astype(int), y_proba
+    )
+
+    # 寻找满足最低召回率的阈值
+    viable_thresholds = thresholds[recall[:-1] > 0.3]  # 设定最低召回率为 30%
+    if len(viable_thresholds) > 0:
+        best_threshold = viable_thresholds[np.argmax(precision[:-1][recall[:-1] > 0.3])]
+    else:
+        best_threshold = 0.5
+
+    return best_threshold
+
+
+# 针对多个目标类别优化阈值
+target_classes = ['Analysis', 'Backdoor', 'DoS']
+optimized_thresholds = {}
+
+for target_class in target_classes:
+    optimized_thresholds[target_class] = optimize_threshold(model, X_val, y_val, target_class)
+    print(f"优化后的 {target_class} 类别阈值: {optimized_thresholds[target_class]:.4f}")
+
+# 应用优化阈值
+def apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes):
+    """根据优化后的阈值调整预测结果"""
+    y_proba = model.predict_proba(X_val)
+    final_pred = np.argmax(y_proba, axis=1)  # 默认预测结果
+
+    for target_class in target_classes:
+        class_idx = label_encoder.transform([target_class])[0]
+        threshold = optimized_thresholds[target_class]
+
+        # 根据阈值调整预测
+        class_proba = y_proba[:, class_idx]
+        final_pred[(class_proba >= threshold)] = class_idx
+
+    return final_pred
+
+
+# 使用优化后的阈值调整预测结果
+val_pred_optimized = apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes)
+val_labels_optimized = label_encoder.inverse_transform(val_pred_optimized)
+
+# 生成优化后的报告
+print("\n" + " 优化后验证报告 ".center(50, "="))
+print(classification_report(
+    true_labels, val_labels_optimized,
+    target_names=label_encoder.classes_,
+    digits=4
+))
 
 # ==================== 8. 全量训练与结果生成 ====================
 # 8.1 第二阶段训练
