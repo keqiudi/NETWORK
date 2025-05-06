@@ -42,33 +42,59 @@ for col in categorical_cols:
 
 # ==================== 3. 特征工程 ====================
 def advanced_feature_engineering(df):
-    """精准匹配字段的安全事件特征工程"""
-    # Backdoor特征
-    df['is_unas_proto'] = (df['proto'] == 'unas').astype(int)
-    df['long_duration'] = (df['dur'] > 1).astype(int)  # 增加长连接特征
+    """精准匹配字段的安全事件特征工程，特别针对Analysis、Backdoor、DoS、Worms类别增强"""
 
-    # DoS特征（使用连接时间统计替代端口）
-    df['is_dos_proto'] = df['proto'].isin(['ospf', 'ggp']).astype(int)
-    df['high_traffic'] = ((df['sbytes'] > 1000) | (df['spkts'] > 40)).astype(int)
-    df['long_duration_conn'] = (df['ct_dst_sport_ltm'] > 60).astype(int)  # 长连接标记
-
-    # Analysis特征（通过服务类型判断）
-    df['is_dns_service'] = (df['service'] == 'dns').astype(int)
-    df['small_packet'] = ((df['spkts'] <= 2) & (df['sbytes'] < 200)).astype(int)
-    df['short_duration'] = (df['dur'] < 0.0001).astype(int)
-
-    # 协议-服务组合特征
+    # ---- 通用基础特征 ----
     df['proto_service'] = df['proto'] + '_' + df['service']
+    df['proto_state'] = df['proto'] + '_' + df['state']
+    df['dbytes_sbytes_ratio'] = df['dbytes'] / (df['sbytes'] + 1e-5)
+    df['spkts_dpkts_ratio'] = df['spkts'] / (df['dpkts'] + 1e-5)
+    df['is_rare_proto'] = df['proto'].isin(df['proto'].value_counts()[df['proto'].value_counts() < 10].index).astype(int)
+    df['is_rare_service'] = df['service'].isin(df['service'].value_counts()[df['service'].value_counts() < 10].index).astype(int)
 
-    # 其他有效特征
+    # ---- Analysis特征 ----
+    df['is_analysis_proto'] = df['proto'].isin(['unas', 'ospf', 'sctp', 'qnx', 'wsn']).astype(int)
+    df['is_analysis_service'] = df['service'].isin(['-', 'smtp', 'dns']).astype(int)
+    df['is_int_state'] = (df['state'] == 'INT').astype(int)
+    df['is_small_analysis'] = ((df['spkts'] <= 2) & (df['sbytes'] < 220)).astype(int)
+    df['analysis_long_conn'] = (df['dur'] > 10).astype(int)
+
+    # ---- Backdoor特征 ----
+    df['is_backdoor_proto'] = df['proto'].isin(['unas', 'sctp', 'tcp']).astype(int)
+    df['is_backdoor_state'] = (df['state'] == 'INT').astype(int)
+    df['is_short_backdoor'] = (df['dur'] < 0.0001).astype(int)
+    df['is_small_backdoor'] = ((df['spkts'] <= 2) & (df['sbytes'] < 220)).astype(int)
+
+    # ---- DoS特征 ----
+    df['is_dos_proto'] = df['proto'].isin(['ospf', 'unas', 'tcp', 'udp']).astype(int)
+    df['is_dos_state'] = df['state'].isin(['INT', 'CON']).astype(int)
+    df['is_high_rate'] = (df['rate'] > 10000).astype(int)
+    df['pkt_rate'] = df['spkts'] / (df['dur'] + 1e-5)
+    df['bytes_rate'] = df['sbytes'] / (df['dur'] + 1e-5)
+    df['is_long_dos'] = (df['dur'] > 10).astype(int)
+    df['is_very_high_pkt'] = (df['spkts'] > 100).astype(int)
+    df['is_very_high_bytes'] = (df['sbytes'] > 10000).astype(int)
+
+    # ---- Worms特征 ----
+    df['is_worm_proto'] = df['proto'].isin(['unas', 'tcp']).astype(int)
+    df['is_worm_state'] = df['state'].isin(['INT', 'CON']).astype(int)
+    df['is_worm_small'] = ((df['spkts'] <= 2) & (df['sbytes'] < 220)).astype(int)
+    df['is_short_worm'] = (df['dur'] < 0.0001).astype(int)
+
+    # ---- 其他有效特征 ----
     df['tcp_win_anomaly'] = ((df['swin'] < 64) | (df['dwin'] < 64)).astype(int)
     df['response_ratio'] = df['dbytes'] / (df['sbytes'] + 1e-5)
+
+    # ---- 数值特征分桶 ----
+    df['sbytes_bin'] = pd.qcut(df['sbytes'], q=5, duplicates='drop', labels=False)
+    df['dur_bin'] = pd.qcut(df['dur'], q=5, duplicates='drop', labels=False)
 
     return df
 
 # 应用特征工程
 X_train = advanced_feature_engineering(X_train)
 X_test = advanced_feature_engineering(X_test)
+
 
 # ==================== 4. 数据编码 ====================
 # 4.1 OneHot编码器初始化
@@ -87,6 +113,18 @@ def encode_features(df, encoder):
 # 4.3 执行编码
 X_train_processed = encode_features(X_train, encoder)
 X_test_processed = encode_features(X_test, encoder)
+
+# 需要编码的自造类别特征
+combo_features = []
+for col in ['proto_service', 'proto_state']:
+    if col in X_train_processed.columns:
+        combo_features.append(col)
+
+for col in combo_features:
+    le = LabelEncoder()
+    # 先转成str，避免有nan或其他类型
+    X_train_processed[col] = le.fit_transform(X_train_processed[col].astype(str))
+    X_test_processed[col] = le.transform(X_test_processed[col].astype(str))
 
 # 检查特征工程生成的非数值列
 if 'proto_service' in X_train_processed.columns:
@@ -110,10 +148,14 @@ X_tr, X_val, y_tr, y_val = train_test_split(
     random_state=42
 )
 
-# 5.2 过采样配置
-from imblearn.over_sampling import SMOTE
-from collections import Counter
+# 重置索引以避免索引不一致问题
+X_tr = X_tr.reset_index(drop=True)
+y_tr = pd.Series(y_tr).reset_index(drop=True)
+
+
+# ==================== 5.2 过采样配置（强烈建议开启！）====================
 from imblearn.over_sampling import ADASYN
+from collections import Counter
 
 # 定义弱势类别
 weak_classes = ['Analysis', 'Backdoor', 'DoS', 'Worms']
@@ -121,29 +163,22 @@ weak_indices = [i for i, name in enumerate(label_encoder.classes_) if name in we
 
 # 计算原始分布
 original_counts = Counter(y_tr)
+# 采样策略：小类样本数扩充到主流类的40%（可微调）
+max_major = max(original_counts[i] for i in set(y_tr) if i not in weak_indices)
+sampling_strategy = {i: int(max_major * 0.4) for i in weak_indices}
 
-# 动态采样策略
-sampling_strategy = {
-    i: max(int(1.5 * original_counts[i]), original_counts[i] + 1)
-    for i in weak_indices
-}
-
-# 5.3 执行过采样
-# 使用ADASYN代替SMOTE
 adasyn = ADASYN(
     sampling_strategy=sampling_strategy,
     n_neighbors=5,
     random_state=42
 )
 
-# 添加少数类样本生成监控
 try:
     X_tr_res, y_tr_res = adasyn.fit_resample(X_tr, y_tr)
-    print(f"生成样本分布: {pd.Series(y_tr_res).value_counts()}")
+    print(f"过采样后样本分布: {pd.Series(y_tr_res).value_counts()}")
 except Exception as e:
     print(f"过采样失败: {e}")
     X_tr_res, y_tr_res = X_tr.copy(), y_tr.copy()
-
 
 # ==================== 6. 模型配置 ====================
 # 6.1 类别权重计算
@@ -159,7 +194,7 @@ difficult_classes = ['Analysis', 'Backdoor', 'Worms']
 difficult_class_indices = [i for i, name in enumerate(label_encoder.classes_) if name in difficult_classes]
 
 for cls_idx in difficult_class_indices:
-    class_weight_dict[cls_idx] *= 2.0  # 增加小类别权重倍数
+    class_weight_dict[cls_idx] *= 1.5  # 增加小类别权重倍数
 
 print("调整后的类别权重:", class_weight_dict)
 
@@ -200,7 +235,7 @@ def optimize_rf(trial):
 def optimize_xgb(trial):
     params = {
         'n_estimators': trial.suggest_int('n_estimators', 100, 350),
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
+        'max_depth': trial.suggest_int('max_depth', 5, 10),
         'learning_rate': trial.suggest_float('learning_rate', 0.02, 0.15),
         'subsample': trial.suggest_float('subsample', 0.6, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
@@ -220,7 +255,7 @@ def optimize_xgb(trial):
 # 随机森林调优
 print("\nOptimizing RandomForest Hyperparameters...")
 rf_study = optuna.create_study(direction="maximize", pruner=MedianPruner())
-rf_study.optimize(optimize_rf, n_trials=50, n_jobs=10, timeout=60)  # 允许并行运行 10 个线程，限制 60 秒
+rf_study.optimize(optimize_rf, n_trials=50, n_jobs=10, timeout=120)  # 允许并行运行 10 个线程，限制 60 秒
 
 print("RandomForest 最佳参数:", rf_study.best_params)
 print("RandomForest 最佳 F1 分数:", rf_study.best_value)
@@ -228,7 +263,7 @@ print("RandomForest 最佳 F1 分数:", rf_study.best_value)
 # XGBoost调优
 print("\nOptimizing XGBoost Hyperparameters...")
 xgb_study = optuna.create_study(direction="maximize", pruner=MedianPruner())
-xgb_study.optimize(optimize_xgb, n_trials=50, n_jobs=10, timeout=60)  # 允许并行运行 10 个线程，限制 60 秒
+xgb_study.optimize(optimize_xgb, n_trials=50, n_jobs=10, timeout=120)  # 允许并行运行 10 个线程，限制 60 秒
 
 print("XGBoost 最佳参数:", xgb_study.best_params)
 print("XGBoost 最佳 F1 分数:", xgb_study.best_value)
@@ -236,46 +271,63 @@ print("XGBoost 最佳 F1 分数:", xgb_study.best_value)
 
 # 6.3 模型初始化器
 def create_model():
-
-
-    # 保留原有随机森林配置
     rf = RandomForestClassifier(
         **rf_study.best_params,
         n_jobs=-1,
         random_state=42
     )
 
-    # 新增XGBoost模型集成
     from xgboost import XGBClassifier
     xgb = XGBClassifier(
         **xgb_study.best_params,
         tree_method='hist',
-        random_state=42
+        random_state=42,
     )
 
-    # 创建混合模型类
+    # 需要加权的类别idx
+    small_class_names = ['Analysis', 'Backdoor', 'DoS', 'Worms']
+    small_class_idx = [label_encoder.transform([name])[0] for name in small_class_names if name in label_encoder.classes_]
+
     class HybridModel:
         def __init__(self):
             self.rf = rf
             self.xgb = xgb
 
         def fit(self, X, y):
-            self.rf.fit(X, y)  # 训练 RandomForestClassifier
-            self.xgb.fit(X, y)  # 训练 XGBoost
+            self.rf.fit(X, y)
+            self.xgb.fit(X, y)
 
         def predict(self, X):
             rf_pred = self.rf.predict_proba(X)
             xgb_pred = self.xgb.predict_proba(X)
-            # 加权融合预测结果
-            return np.argmax(0.6 * xgb_pred + 0.4 * rf_pred, axis=1)
+            weights = np.ones_like(rf_pred[0])
+            for idx in small_class_idx:
+                weights[idx] = 1.8  # 更激进的小类权重
+            total_pred = (0.7 * xgb_pred + 0.3 * rf_pred) * weights  # 融合权重向xgb倾斜
+            return np.argmax(total_pred, axis=1)
 
         def predict_proba(self, X):
             rf_pred = self.rf.predict_proba(X)
             xgb_pred = self.xgb.predict_proba(X)
-            # 加权融合概率
-            return 0.6 * xgb_pred + 0.4 * rf_pred
+            weights = np.ones_like(rf_pred[0])
+            for idx in small_class_idx:
+                weights[idx] = 1.8
+            return (0.7 * xgb_pred + 0.3 * rf_pred) * weights
 
     return HybridModel()
+
+# ==================== 阈值优化 ====================
+from sklearn.metrics import precision_recall_curve
+
+def apply_optimized_thresholds(model, X_val, small_class_names, base_threshold=0.5, aggressive_threshold=0.18):
+    y_proba = model.predict_proba(X_val)
+    final_pred = np.argmax(y_proba, axis=1)
+    for cls in small_class_names:
+        if cls in label_encoder.classes_:
+            idx = label_encoder.transform([cls])[0]
+            class_proba = y_proba[:, idx]
+            final_pred[class_proba >= aggressive_threshold] = idx
+    return final_pred
 
 # ==================== 7. 模型训练与验证 ====================
 
@@ -307,88 +359,33 @@ def train_with_progress(model, X, y, X_val=None, y_val=None, total_trees=300, ba
 print("\n" + " PHASE 1: INITIAL TRAINING (80%训练 20%验证) ".center(50, "="))
 
 model = create_model()
-train_with_progress(model, X_tr_res, y_tr_res, X_val, y_val)  # 传入验证数据
+train_with_progress(model, X_tr_res, y_tr_res, X_val, y_val)
 
-# 7.2 验证集评估
+# 7.2 验证集评估（包含阈值优化结果）
 val_pred = model.predict(X_val)
+# 激进阈值优化
+small_class_names = ['Analysis', 'Backdoor', 'DoS', 'Worms']
+val_pred_opt = apply_optimized_thresholds(model, X_val, small_class_names, base_threshold=0.5, aggressive_threshold=0.18)
 val_labels = label_encoder.inverse_transform(val_pred)
+val_labels_opt = label_encoder.inverse_transform(val_pred_opt)
 true_labels = label_encoder.inverse_transform(y_val)
 
-# 7.3 生成报告
 print("\n" + " 验证报告 ".center(50, "="))
-print(classification_report(
-    true_labels, val_labels,
-    target_names=label_encoder.classes_,
-    digits=4
-))
+print(classification_report(true_labels, val_labels, target_names=label_encoder.classes_, digits=4))
+print("\n" + " 阈值优化后验证报告 ".center(50, "="))
+print(classification_report(true_labels, val_labels_opt, target_names=label_encoder.classes_, digits=4))
 
-# 7.4 关键指标计算
 macro_f1 = f1_score(y_val, val_pred, average='macro')
+macro_f1_opt = f1_score(y_val, val_pred_opt, average='macro')
 weighted_f1 = f1_score(y_val, val_pred, average='weighted')
+weighted_f1_opt = f1_score(y_val, val_pred_opt, average='weighted')
 
 print(f"\n核心指标：")
-print(f"► 宏平均F1: {macro_f1:.4f}")
-print(f"► 加权平均F1: {weighted_f1:.4f}")
+print(f"► 宏平均F1: {macro_f1:.4f}（普通） | {macro_f1_opt:.4f}（阈值优化）")
+print(f"► 加权平均F1: {weighted_f1:.4f} | {weighted_f1_opt:.4f}")
 print("=" * 65)
 
-# 在现有代码后添加阈值优化
-from sklearn.metrics import precision_recall_curve
 
-def optimize_threshold(model, X_val, y_val, target_class):
-    """为指定类别优化预测阈值"""
-    class_idx = label_encoder.transform([target_class])[0]
-    y_proba = model.predict_proba(X_val)[:, class_idx]  # 获取目标类别的概率
-
-    precision, recall, thresholds = precision_recall_curve(
-        (y_val == class_idx).astype(int), y_proba
-    )
-
-    # 寻找满足最低召回率的阈值
-    viable_thresholds = thresholds[recall[:-1] > 0.3]  # 设定最低召回率为 30%
-    if len(viable_thresholds) > 0:
-        best_threshold = viable_thresholds[np.argmax(precision[:-1][recall[:-1] > 0.3])]
-    else:
-        best_threshold = 0.5
-
-    return best_threshold
-
-
-# 针对多个目标类别优化阈值
-target_classes = ['Analysis', 'Backdoor', 'DoS']
-optimized_thresholds = {}
-
-for target_class in target_classes:
-    optimized_thresholds[target_class] = optimize_threshold(model, X_val, y_val, target_class)
-    print(f"优化后的 {target_class} 类别阈值: {optimized_thresholds[target_class]:.4f}")
-
-# 应用优化阈值
-def apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes):
-    """根据优化后的阈值调整预测结果"""
-    y_proba = model.predict_proba(X_val)
-    final_pred = np.argmax(y_proba, axis=1)  # 默认预测结果
-
-    for target_class in target_classes:
-        class_idx = label_encoder.transform([target_class])[0]
-        threshold = optimized_thresholds[target_class]
-
-        # 根据阈值调整预测
-        class_proba = y_proba[:, class_idx]
-        final_pred[(class_proba >= threshold)] = class_idx
-
-    return final_pred
-
-
-# 使用优化后的阈值调整预测结果
-val_pred_optimized = apply_optimized_thresholds(model, X_val, optimized_thresholds, target_classes)
-val_labels_optimized = label_encoder.inverse_transform(val_pred_optimized)
-
-# 生成优化后的报告
-print("\n" + " 优化后验证报告 ".center(50, "="))
-print(classification_report(
-    true_labels, val_labels_optimized,
-    target_names=label_encoder.classes_,
-    digits=4
-))
 
 # ==================== 8. 全量训练与结果生成 ====================
 # 8.1 第二阶段训练
