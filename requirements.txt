@@ -1,0 +1,7 @@
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.4.2
+xgboost==2.0.3
+imbalanced-learn==0.12.2
+tqdm==4.66.4
+optuna==3.6.1
