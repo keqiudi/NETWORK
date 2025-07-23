@@ -1,6 +1,6 @@
 # 网络流量安全事件分类模型
 
-本项目基于 Python，集成 XGBoost 和 RandomForest，实现对网络流量攻击类别的高精度识别，适配多种不平衡样本场景。特征工程特别针对 Analysis、Backdoor、DoS、Worms 等弱类增强，具备强泛化能力。支持采样、类别权重调整、概率融合与阈值优化。
+iscc数据安全赛比赛题目：本项目基于 Python，集成 XGBoost 和 RandomForest，实现对网络流量攻击类别的高精度识别，适配多种不平衡样本场景。特征工程特别针对 Analysis、Backdoor、DoS、Worms 等弱类增强，具备强泛化能力。支持采样、类别权重调整、概率融合与阈值优化。
 
 ## 环境依赖
 
